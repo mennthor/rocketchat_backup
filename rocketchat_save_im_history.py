@@ -78,11 +78,6 @@ def main():
     # Retrieve history from every room we got above
     # API point: https://docs.rocket.chat/api/rest-api/methods/im/history
     for chat in chats:
-        # Get IM room info, extract number of total msgs and use existing file
-        # to calculate the numer of new messages to fetch
-        counters = rocket.im_counters(room_id=chat["_id"]).json()
-        n_tot_msgs = counters["msgs"]
-
         # File is named with the other user(s) in the chat
         other_user = [u.replace(".", "_")
                       for u in chat["usernames"] if u != user]
@@ -90,6 +85,15 @@ def main():
         fpath = os.path.join(STORAGE_PATH, fname)
 
         print("# Handling chat history with '{}'".format(", ".join(other_user)))
+
+        # Get IM room info, extract number of total msgs and use existing file
+        # to calculate the numer of new messages to fetch
+        counters = rocket.im_counters(room_id=chat["_id"]).json()
+        try:
+            n_tot_msgs = counters["msgs"]
+        except KeyError:
+            print("- No messages found for this chat, skipping...")
+            continue
 
         # Check existing file to avoid reloading all messages
         # Note: What if older msgs are edited? Then this fails.
