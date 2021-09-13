@@ -112,7 +112,7 @@ def main():
                   .format(n_existing_msgs, fpath))
             n_tot_msgs -= n_existing_msgs
 
-        if n_tot_msgs < 1:
+        if n_tot_msgs is None or n_tot_msgs < 1:
             print("- No (new) messages found for this chat, skipping...")
             continue
 
