@@ -10,6 +10,7 @@ import sys
 import json
 import getpass
 import argparse
+from requests import sessions
 
 from rocketchat_API.rocketchat import RocketChat
 from rocketchat_API.APIExceptions.RocketExceptions import RocketAuthenticationException
@@ -60,89 +61,91 @@ def main():
     passwd = getpass.getpass(
         prompt="Provide password for rocketchat user '{}': ".format(user))
 
-    try:
-        rocket = RocketChat(user, passwd, server_url=GWDG_SERVER)
-    except RocketAuthenticationException:
-        sys.exit("Invalid credentials for user '{}', exiting...".format(user))
-
-    print("{}acking up RocketChat ('{}') IM messages for '{}' to '{}'\n".format(
-          "Incrementally b" if args.incremental else "B",
-          GWDG_SERVER, user, STORAGE_PATH))
-
-    # Retrieve and parse list of direct message rooms the user is involved in
-    # API point: https://docs.rocket.chat/api/rest-api/methods/im/list
-    im_list = rocket.im_list().json()
-    # Filter out the own chat, where only the user is present (storage-chat)
-    chats = [d for d in im_list["ims"] if len(d["usernames"]) > 1]
-
-    # Retrieve history from every room we got above
-    # API point: https://docs.rocket.chat/api/rest-api/methods/im/history
-    for chat in chats:
-        # File is named with the other user(s) in the chat
-        other_user = [u.replace(".", "_")
-                      for u in chat["usernames"] if u != user]
-        fname = "im_" + "_".join(other_user) + ".json"
-        fpath = os.path.join(STORAGE_PATH, fname)
-
-        print("# Handling chat history with '{}'".format(", ".join(other_user)))
-
-        # Get IM room info, extract number of total msgs and use existing file
-        # to calculate the numer of new messages to fetch
-        counters = rocket.im_counters(room_id=chat["_id"]).json()
+    with sessions.Session() as session:
         try:
-            n_tot_msgs = counters["msgs"]
-        except KeyError:
-            print("- No messages found for this chat, skipping...")
-            continue
+            rocket = RocketChat(
+                user, passwd, server_url=GWDG_SERVER, session=session)
+        except RocketAuthenticationException:
+            sys.exit("Invalid credentials for user '{}', exiting...".format(user))
 
-        # Check existing file to avoid reloading all messages
-        # Note: What if older msgs are edited? Then this fails.
-        # Note: This may also break, if there is a max history size on the
-        #       RocketChat servers, then we may miss msgs
-        # Maybe it's better to load all available msgs everytime and append
-        # those not present in the already saved file?
-        existing_msgs = None
-        n_existing_msgs = 0
-        if args.incremental and os.path.isfile(fpath):
-            with open(fpath, "r") as infile:
-                existing_msgs = json.load(infile)
+        print("{}acking up RocketChat ('{}') IM messages for '{}' to '{}'\n".format(
+              "Incrementally b" if args.incremental else "B",
+              GWDG_SERVER, user, STORAGE_PATH))
 
-            n_existing_msgs = len(existing_msgs["messages"])
-            print("- Found existing history ({} msgs) in '{}'"
-                  .format(n_existing_msgs, fpath))
-            n_tot_msgs -= n_existing_msgs
+        # Retrieve and parse list of direct message rooms the user is involved in
+        # API point: https://docs.rocket.chat/api/rest-api/methods/im/list
+        im_list = rocket.im_list().json()
+        # Filter out the own chat, where only the user is present (storage-chat)
+        chats = [d for d in im_list["ims"] if len(d["usernames"]) > 1]
 
-        if n_tot_msgs is None or n_tot_msgs < 1:
-            print("- No (new) messages found for this chat, skipping...")
-            continue
+        # Retrieve history from every room we got above
+        # API point: https://docs.rocket.chat/api/rest-api/methods/im/history
+        for chat in chats:
+            # File is named with the other user(s) in the chat
+            other_user = [u.replace(".", "_")
+                          for u in chat["usernames"] if u != user]
+            fname = "im_" + "_".join(other_user) + ".json"
+            fpath = os.path.join(STORAGE_PATH, fname)
 
-        # Get new msgs
-        im_hist = rocket.im_history(
-            chat["_id"], count=n_tot_msgs, inclusive="true").json()
-        if not im_hist["success"]:
-            print("Error retrieving messages from chat, skipping...")
-            continue
+            print("# Handling chat history with '{}'".format(", ".join(other_user)))
 
-        # If file already exists and we load only new msgs, do some msg ID
-        # checks to avoid storing duplicates
-        if existing_msgs is not None:
-            # Sort to ensure proper time order (API is returning sorted but we
-            # can ensure this explicitely)
-            existing_msgs_sorted = sort_msg_by_ts(existing_msgs["messages"])[0]
-            im_hist_msgs_sorted = sort_msg_by_ts(im_hist["messages"])[0]
-            # from IPython import embed; embed()
-            latest_existing = existing_msgs_sorted[-1]["ts"]
-            im_hist_msgs_sorted = [msg for msg in im_hist_msgs_sorted
-                                   if msg["ts"] != latest_existing]
+            # Get IM room info, extract number of total msgs and use existing file
+            # to calculate the numer of new messages to fetch
+            counters = rocket.im_counters(room_id=chat["_id"]).json()
+            try:
+                n_tot_msgs = counters["msgs"]
+            except KeyError:
+                print("- No messages found for this chat, skipping...")
+                continue
 
-            # Prepend to existing msgs
-            im_hist["messages"] = im_hist_msgs_sorted + existing_msgs_sorted
+            # Check existing file to avoid reloading all messages
+            # Note: What if older msgs are edited? Then this fails.
+            # Note: This may also break, if there is a max history size on the
+            #       RocketChat servers, then we may miss msgs
+            # Maybe it's better to load all available msgs everytime and append
+            # those not present in the already saved file?
+            existing_msgs = None
+            n_existing_msgs = 0
+            if args.incremental and os.path.isfile(fpath):
+                with open(fpath, "r") as infile:
+                    existing_msgs = json.load(infile)
 
-        # Dump to JSON
-        print("- Saving {} new messages ({} total) to chat history '{}'"
-              .format(n_tot_msgs, n_tot_msgs + n_existing_msgs, fpath))
-        with open(fpath, "w") as outf:
-            json.dump(im_hist, outf, indent=2)
+                n_existing_msgs = len(existing_msgs["messages"])
+                print("- Found existing history ({} msgs) in '{}'"
+                      .format(n_existing_msgs, fpath))
+                n_tot_msgs -= n_existing_msgs
+
+            if n_tot_msgs is None or n_tot_msgs < 1:
+                print("- No (new) messages found for this chat, skipping...")
+                continue
+
+            # Get new msgs
+            im_hist = rocket.im_history(
+                chat["_id"], count=n_tot_msgs, inclusive="true").json()
+            if not im_hist["success"]:
+                print("Error retrieving messages from chat, skipping...")
+                continue
+
+            # If file already exists and we load only new msgs, do some msg ID
+            # checks to avoid storing duplicates
+            if existing_msgs is not None:
+                # Sort to ensure proper time order (API is returning sorted but we
+                # can ensure this explicitely)
+                existing_msgs_sorted = sort_msg_by_ts(existing_msgs["messages"])[0]
+                im_hist_msgs_sorted = sort_msg_by_ts(im_hist["messages"])[0]
+                # from IPython import embed; embed()
+                latest_existing = existing_msgs_sorted[-1]["ts"]
+                im_hist_msgs_sorted = [msg for msg in im_hist_msgs_sorted
+                                       if msg["ts"] != latest_existing]
+
+                # Prepend to existing msgs
+                im_hist["messages"] = im_hist_msgs_sorted + existing_msgs_sorted
+
+            # Dump to JSON
+            print("- Saving {} new messages ({} total) to chat history '{}'"
+                  .format(n_tot_msgs, n_tot_msgs + n_existing_msgs, fpath))
+            with open(fpath, "w") as outf:
+                json.dump(im_hist, outf, indent=2)
 
     print("\nDone")
 
